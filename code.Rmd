@@ -16,7 +16,7 @@ library(randomForest)
 library(caret)
 library(tidyverse)
 library(VIM)
-
+library(dplyr)
 
 ```
 
@@ -32,47 +32,76 @@ My research question is as follows: How does length of hospital stay and subsequ
 After considering the nature of my research question, I considered the following variables to be key to answering my research question,
 
 *Primary Variables:*
-Length of Stay (length_of_stay): The primary outcome variable.
-Patient Disposition (patient_disposition): The secondary outcome variable indicating what happens to patients after surgery (e.g., discharged to home, transferred to another facility).
-Type of Insurance Coverage (payment_typology_1, payment_typology_2, payment_typology_3): The primary explanatory variables. These indicate the insurance coverage types of the patients.
+* Length of Stay (length_of_stay): The primary outcome variable.
+* Patient Disposition (patient_disposition): The secondary outcome variable indicating what happens to patients after surgery (e.g., discharged to home, transferred to another facility).
+* Type of Insurance Coverage (payment_typology_1, payment_typology_2, payment_typology_3): The primary explanatory variables. These indicate the insurance coverage types of the patients.
 
 *Control Variables:*
-Age Group (age_group): Older patients might stay longer in hospitals due to complications.
-APR Severity of Illness (apr_severity_of_illness_description): This might influence both the length of stay and patient disposition.
-APR Risk of Mortality (apr_risk_of_mortality): This is crucial as it likely correlates with both the severity of the illness and the outcomes.
-Type of Admission (type_of_admission): Emergency, urgent, elective, etc., could affect both the length of stay and the type of disposition.
-APR Medical Surgical Description (apr_medical_surgical_description): Whether the admission was for a surgical procedure or a medical condition could impact the length of stay and disposition.
+* Age Group (age_group): Older patients might stay longer in hospitals due to complications.
+* APR Severity of Illness (apr_severity_of_illness_description): This might influence both the length of stay and patient disposition.
+* APR Risk of Mortality (apr_risk_of_mortality): This is crucial as it likely correlates with both the severity of the illness and the outcomes.
+* Type of Admission (type_of_admission): Emergency, urgent, elective, etc., could affect both the length of stay and the type of disposition.
+* APR Medical Surgical Description (apr_medical_surgical_description): Whether the admission was for a surgical procedure or a medical condition could impact the length of stay and disposition.
 
 
 
 
 ### Loading and pre-cleaning data
+
+
+I noticed the secondary and tertiary insurance types were missing for alot of patients, likley indicating that there is no additional coverage for these patients. They were classified into a no additional coverage category below. I also converted the relevant variables into factors and ordered them, if applicable.
 ```{r}
 hospital_df = read_csv("./data/sparcs_hospital.csv") %>% janitor::clean_names()
 
-## checking more missingness
-  # Sum of NA values in each column
-sum_na <- sapply(hospital_df, function(x) sum(is.na(x)))
-
-# Proportion of NA values in each column
-prop_na <- sapply(hospital_df, function(x) mean(is.na(x))) * 100
-
-# Print results
-print(sum_na)
-print(prop_na)
-```
-
-
-I noticed the secondary and tertiary insurance types were missing for alot of patients, likley indicating that there is no additional coverage for these patients. They were classified into a no additional coverage category below. 
-```{r}
 # For payment_typology_2 and payment_typology_3
 hospital_df$payment_typology_2[is.na(hospital_df$payment_typology_2)] <- "No Additional Coverage"
 hospital_df$payment_typology_3[is.na(hospital_df$payment_typology_3)] <- "No Additional Coverage"
 
-# For apr_severity_of_illness_description using mice for multiple imputation
-library(mice)
-imp_data <- mice(data[, c("apr_severity_of_illness_description", "apr_risk_of_mortality", "other_variables_if_needed")], m=5, method='pmm', seed=500)
-completed_data <- complete(imp_data, 1)
+# Coding as factors
+hospital_df$payment_typology_1 <- as.factor(hospital_df$payment_typology_1)
+hospital_df$payment_typology_2 <- as.factor(hospital_df$payment_typology_2)
+hospital_df$payment_typology_3 <- as.factor(hospital_df$payment_typology_3)
+hospital_df$type_of_admission <- as.factor(hospital_df$type_of_admission)
+hospital_df$apr_medical_surgical_description <- as.factor(hospital_df$apr_medical_surgical_description)
+
+# Coding as ordered factors
+hospital_df$apr_severity_of_illness_description <- factor(hospital_df$apr_severity_of_illness_description, 
+                                                   levels = c("Minor", "Moderate", "Major", "Extreme"), 
+                                                   ordered = TRUE)
+
+hospital_df$apr_risk_of_mortality <- factor(hospital_df$apr_risk_of_mortality, 
+                                     levels = c("Minor", "Moderate", "Major", "Extreme"), 
+                                     ordered = TRUE)
+
+hospital_df$age_group <- factor(hospital_df$age_group, 
+                                     levels = c("0 to 17", "18 to 29", "30 to 49", "50 to 69", "70 or Older" ), 
+                                     ordered = TRUE)
+```
+
+My next step was to check for missingness in the variables of interest. Since the missing values were <0.005% of the dataset, the missing values were imputed via the mode.
+```{r}
+# Specify variables to count missing values for
+imp_vars <- c("length_of_stay", "patient_disposition", 
+                   "payment_typology_1", "payment_typology_2", "payment_typology_3",
+                   "age_group", "apr_severity_of_illness_description",
+                   "apr_risk_of_mortality", "type_of_admission", 
+                   "apr_medical_surgical_description")
+
+# Count missing values for specified variables
+missing_counts <- hospital_df %>%
+  select(one_of(imp_vars)) %>%
+  summarise_all(~ sum(is.na(.)))
+
+# Print the counts of missing values
+print(missing_counts)
+
+# Calculate the mode for each variable
+mode_severity <- names(which.max(table(hospital_df$apr_severity_of_illness_description)))
+mode_mortality <- names(which.max(table(hospital_df$apr_risk_of_mortality)))
+
+# Replace missing values with the mode
+hospital_df$apr_severity_of_illness_description[is.na(hospital_df$apr_severity_of_illness_description)] <- mode_severity
+hospital_df$apr_risk_of_mortality[is.na(hospital_df$apr_risk_of_mortality)] <- mode_mortality
 
 ```
 
