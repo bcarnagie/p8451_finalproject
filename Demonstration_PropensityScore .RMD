@@ -1,0 +1,233 @@
+---
+title: "Demonstration of Calculating Propensity Scores with Machine Learning"
+author: "JAS"
+date: ' '
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Demonstration of Propensity Score Construction and Analysis
+
+This demonstration will illustrate how to use machine learning algorithms to calculate propensity scores. We will compare the use of logistic regression and random forest as the algorithms to construct the propensity scores (i.e. predictions). We will evaluate their performance by comparing the covariate distributions between the exposed and unexposed groups following the construction of the propensity score and matching to obtain exchangable groups.  
+
+This example is based on materials developed by Dr. Brian Lee for the 2013 SPER Advanced Methods Workshop. https://sper.org/annual-meeting-2/advanced-methods-workshop/advanced-methods-wksp-slides/
+
+***
+
+### Data Description
+
+The data we will use for this demonstration is the 1987 U.S. National Medical Expenditures Survey. The National Medical Expenditure Survey (NMES) series provides information on health expenditures by or on behalf of families and individuals, the financing of these expenditures, and each person's use of services. Original data can be found: https://www.icpsr.umich.edu/web/NACDA/series/45
+
+We are using a subset of the 1987 NEMS to explore the research question:
+
+What is the effect of ever smoking on odds of lung cancer/laryngeal cancer or COPD, as compared with never smoking?
+
+Variables in the dataset that will be used in this demonstration are:
+
+PIDX: Identifier
+LASTAGE: Age of Participant
+MALE: Self-Reported Sex of Participant (Male=1, Female=0)
+RACE3: Self-Reported Race of Participant (Caucasian=3/ African-American=2/ Other=1)
+educate: Self-Reported Highest Level of Education (1=College grad, 2=Some College, 3=HS grad, 4=Other)
+beltuse: Use of seatbelt (1=Rare, 2=Somtimes, 3=Always)
+marital: 1=Married, 2=Widowed, 3=divorced, 4=separated, 5=Never married
+SREGION: census region (1=NE, 2=MW, 3=S, 4=W)
+POVSTALB: poverty status (1=Poor, 2=Near Poor, 3=Low Income, 4=Middle Income, 5=High Income)
+eversmk: Self-Reported Smoking Behavior (1=Ever smoker, 0=Never smoker)
+lc5: Self-Reported Outcome (1=lung cancer/laryngeal cancer/COPD, 0=No outcome)
+
+
+***
+
+### Step 1: Load Packages
+
+We will use the matchit package for matching by propensity score and the randomforest within the caret package to generate the propensity score.
+
+
+```{r packages}
+library(MatchIt)
+library(randomForest)
+library(caret)
+library(tidyverse)
+
+```
+
+### Step 2: Read-in and clean data
+
+For random forest, cannot have any missing data. For illustration purposes, we will conduct a complete-case analysis.
+
+Note that missing data have been denoted by a '.'. So we need to change that to NA and then restrict to complete cases. Also need to convert numeric data to factor where appropriate.
+
+
+```{r data_prep}
+
+setwd("C:/Users/js5406/OneDrive - cumc.columbia.edu/ML_Epi/Aarhus")
+nmes_data <- read.delim("./data/nmes_data.txt")
+
+#Restrict to only needed variables
+keep.var<-c("LASTAGE", "MALE", "RACE3", "eversmk", "lc5", "beltuse", "educate", "marital", "SREGION", "POVSTALB")
+nmes.data<-nmes_data[,keep.var]
+
+#Inspect data summaries
+str(nmes.data)
+
+#Recode missings
+nmes.data[nmes.data=="."]<-NA
+
+#Change variable types where appropriate
+nmes.data$MALE <- as.factor(nmes.data$MALE)
+nmes.data$educate <- as.factor(nmes.data$educate)
+nmes.data$RACE3 <- as.factor(nmes.data$RACE3)
+nmes.data$eversmk<-as.factor(nmes.data$eversmk)
+nmes.data$SREGION <- as.factor(nmes.data$SREGION)
+nmes.data$lc5<-as.factor(nmes.data$lc5)
+nmes.data$beltuse<-as.factor(nmes.data$beltuse)
+nmes.data$marital<-as.factor(nmes.data$marital)
+
+nmes.data$POVSTALB<-factor(nmes.data$POVSTALB, order=TRUE)
+
+nmesdata<-na.omit(nmes.data)    
+```
+
+### Step 3: Estimate the Propensity Score using Logistic Regression 
+
+Considerations: which features do you want to use to generate your propensity score?
+
+For illustration, I am using all covariates.
+
+```{r logistic}
+ps.model.logit <- glm(eversmk ~ LASTAGE + MALE + educate + beltuse + POVSTALB + marital + RACE3 + SREGION,
+                      data=nmesdata, 
+                      family=binomial(link="logit"))
+summary(ps.model.logit)
+    
+# estimates odds of eversmoke, then convert to probability (aka the propensity score)
+  prop.score <- (predict(ps.model.logit, nmesdata, type="response"))
+  nmesdata$PS.LOGIT <- prop.score # the logistic regression estimated PS
+    
+# Logistic Regression model can be misspecified rather easily. Example, do age and smoking have a linear relationship?
+    
+   temp<-table(nmesdata$eversmk, nmesdata$LASTAGE) 
+    pct.eversmk <- 100*(temp[2, ] / (temp[2,] + temp[1,]))
+    plot(40:94, pct.eversmk, xlab="Age", ylab="% ever smokers", pch=".", cex=7, cex.lab=1.5, cex.axis=1.5)
+    
+    
+```
+
+### Step 4: Estimate the Propensity Score using Random Forest
+
+The first step is to run your random forest to generate the predicted probabilities. Some of the original papers suggest tuning may not be necessary, as the defaults do pretty well. But, I'm providing code to automate the tuning using both mtry and number of trees.
+
+```{r randomforest}
+set.seed(123)
+
+###This section of code loops through various mtry and number of trees for tuning####
+
+feat.count<-c((ncol(nmesdata)-4), (ncol(nmesdata)-4)/2, sqrt(ncol(nmesdata)-4))
+
+grid.rf<-expand.grid(mtry=feat.count)
+
+tree.num<-seq(100,500, by=200)
+
+results.trees<-list()
+
+for (ntree in tree.num){
+ set.seed(123)
+  rf.train<-train(eversmk~LASTAGE + MALE + educate + beltuse + POVSTALB + marital + RACE3 + SREGION, 
+                 data=nmesdata, 
+                 method="rf", 
+                 metric="Accuracy", 
+                 tuneGrid=grid.rf, 
+                 importance=TRUE, 
+                 ntree=ntree)
+index<-toString(ntree)
+results.trees[[index]]<-rf.train$results
+}
+
+output.trees<-bind_rows(results.trees, .id = "ntrees")
+best.tune<-output.trees[which.max(output.trees[,"Accuracy"]),]
+
+##Using optimal values from tuning above, I'm creating my final model within the actual random forest package. ##Exercise: How would you replicate this using just the caret package?
+
+set.seed(123)
+ps.model.rf<-randomForest(eversmk~LASTAGE + MALE + educate + beltuse + POVSTALB + marital + RACE3 + SREGION, 
+                    data=nmesdata, mtry=3, ntree=500)
+
+#Append predicted probabilities onto original dataset
+ps.rf<-ps.model.rf$votes
+nmesdata$PS.RF<-ps.rf[,2]
+
+#Compare propensity scores
+plot(nmesdata$PS.LOGIT, nmesdata$PS.RF)
+
+```
+### Examine region of common support
+
+This is common for propensity score analyses, to ensure that there is overlap in propensities among those who were "exposed/treated" and those who were not.
+```{r overlap}
+
+ggplot(data=nmesdata, aes(x=PS.LOGIT))+geom_histogram()+facet_grid(~eversmk)+theme_bw()+ggtitle("Overlap PS from Logistic Regression")
+
+ggplot(data=nmesdata, aes(x=PS.RF))+geom_histogram()+facet_grid(~eversmk)+theme_bw()+ggtitle("Overlap PS from Random Forest")
+
+```
+
+
+### Step 5: Match by propensity score in 1:1 matching and compare covariate balance and population size
+
+The matchit function matches individuals by "distance". Here, we make our distance the propensity score. We matching to the *nearest* value that is within a *caliper* of 0.2 standard deviations. If there are observations, either exposed or unexposed, without any matches, they are *discarded* from the analysis. The *ratio* of exposed to unexposed in matching is 1.
+
+```{r matching}
+#Creating matching using propensity scores from logistic regression
+  nn1 <- matchit(eversmk ~ LASTAGE + MALE + educate + beltuse + POVSTALB + marital + RACE3 + SREGION, 
+                    data=nmesdata, distance=nmesdata$PS.LOGIT, method="nearest", discard="both", caliper=0.2, 
+                    ratio=1)
+  nn1.data <- match.data(nn1)
+  summary(nn1, standardize=T)
+
+#Creating matching using propensity scores from random forest    
+  nn1.rf <- matchit(eversmk ~ LASTAGE + MALE + educate + beltuse + POVSTALB + marital + RACE3 + SREGION, 
+                    data=nmesdata, distance=nmesdata$PS.RF, method="nearest", discard = "both", caliper=0.2, 
+                    ratio=1)
+      
+  nn1.data.rf <- match.data(nn1.rf)
+  summary(nn1.rf, standardize=T)
+  
+  #More individuals "match" using RF propensity score than logistic regression
+    
+##Compare exchangeability across matched populations
+  
+  #Average Standardized Mean Difference-Unmatched
+  mean(abs(summary(nn1, standardize=T)$sum.all[, 3][-1])) 
+    
+    # Matching attempt #1 Logistic Regression Propensity Score
+    mean(abs(summary(nn1, standardize=T)$sum.matched[, 3][-1])) 
+
+    # Matching attempt #2 Random Forest Propensity Score
+    mean(abs(summary(nn1.rf, standardize=T)$sum.matched[, 3][-1])) 
+```
+
+### Estimate and compare effects across algorithms
+
+```{r compare}
+
+ outcome.model.1 <- glm(lc5 ~ eversmk, data=nn1.data, family=binomial(link="logit"))
+    
+    exp(outcome.model.1$coefficients)
+        exp(confint(outcome.model.1))
+    
+    outcome.model.2 <- glm(lc5 ~ eversmk, data=nn1.data.rf, family=binomial(link="logit"))
+    
+        exp(outcome.model.2$coefficients)
+            exp(confint(outcome.model.2))
+```
+
+
+### ASSIGNMENT
+
+I have demonstrated how to utilize random forest and logistic regression in a propensity score analysis. Using the same data, use a different algorithm to construct the propensity scores. Compare your results to the above. Are they what you expected? 
