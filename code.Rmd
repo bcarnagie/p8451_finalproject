@@ -8,9 +8,37 @@ date: "2024-04-16"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+
+```{r}
+library(tidyverse)
+library(MatchIt)
+library(randomForest)
+library(caret)
+library(tidyverse)
+```
+
+
+
 ## Option 2: Explore a provided dataset for pre-specified research goals
 
-I decided to go with option c, which involves constructing a propensity score to aid in an epidemiologic analysis of an etiologic question and then
+I decided to go with *option c*, which involves constructing a propensity score to aid in an epidemiologic analysis of an etiologic question and then
 performing an analysis using the propensity score to address that etiologic question.
 
 My research question is as follows: How does length of hospital stay and subsequent patient disposition vary by type of insurance coverage in surgical patients?
+
+Similar to Option 1, the analysis must meet the following minimum criteria:
+ Compare performance of least two machine learning algorithms covered in class
+ Encompass a full analytic pipeline appropriate for the specific research question (e.g. the construction
+of a risk score requires typical components of a prediction pipeline but then additionally assesses
+calibration)
+ Tune hyperparameters across a broad range of values (not just package defaults)
+
+
+### Loading and pre-cleaning data
+```{r}
+hospital_df = read_csv("./data/sparcs_hospital.csv") %>% janitor::clean_names()
+
+
+  
+  
+```
