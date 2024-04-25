@@ -9,7 +9,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 
-```{r}
+```{r, message=FALSE}
 library(tidyverse)
 library(MatchIt)
 library(randomForest)
@@ -17,9 +17,11 @@ library(caret)
 library(tidyverse)
 library(VIM)
 library(dplyr)
+library(nnet)
+library(ranger)
+library(progress)
 
 ```
-
 
 
 ## Option 2: Explore a provided dataset for pre-specified research goals
@@ -44,13 +46,10 @@ After considering the nature of my research question, I considered the following
 * APR Medical Surgical Description (apr_medical_surgical_description): Whether the admission was for a surgical procedure or a medical condition could impact the length of stay and disposition.
 
 
-
-
 ### Loading and pre-cleaning data
 
-
-I noticed the secondary and tertiary insurance types were missing for alot of patients, likley indicating that there is no additional coverage for these patients. They were classified into a no additional coverage category below. I also converted the relevant variables into factors and ordered them, if applicable.
-```{r}
+I noticed the secondary and tertiary insurance types were missing for alot of patients, likely indicating that there is no additional coverage for these patients. They were classified into a no additional coverage category below. I also converted the relevant variables into factors and ordered them, if applicable.
+```{r data_prep}
 hospital_df = read_csv("./data/sparcs_hospital.csv") %>% janitor::clean_names()
 
 # For payment_typology_2 and payment_typology_3
@@ -79,7 +78,7 @@ hospital_df$age_group <- factor(hospital_df$age_group,
 ```
 
 My next step was to check for missingness in the variables of interest. Since the missing values were <0.005% of the dataset, the missing values were imputed via the mode.
-```{r}
+```{r imputation}
 # Specify variables to count missing values for
 imp_vars <- c("length_of_stay", "patient_disposition", 
                    "payment_typology_1", "payment_typology_2", "payment_typology_3",
@@ -105,3 +104,75 @@ hospital_df$apr_risk_of_mortality[is.na(hospital_df$apr_risk_of_mortality)] <- m
 
 ```
 
+
+### Step 3: Estimate the Propensity Score using Multinomial Logistic Regression 
+```{r}
+
+multinom_model <- multinom(payment_typology_1 ~ age_group + apr_severity_of_illness_description + 
+                           apr_risk_of_mortality + type_of_admission + apr_medical_surgical_description, 
+                           data = hospital_df)
+prop.score <- predict(multinom_model, type = "probs")
+
+hospital_df$ps.logit <- prop.score # the logistic regression estimated PS
+
+```
+
+
+### Step 4: Estimate the Propensity Score using Random Forest
+```{r randomforest}
+set.seed(123)
+
+formula <- payment_typology_1 ~ age_group + apr_severity_of_illness_description + 
+           apr_risk_of_mortality + type_of_admission + apr_medical_surgical_description
+
+# Calculate the number of predictor variables
+num_predictors <- length(setdiff(names(hospital_df), "payment_typology_1"))
+
+# Create a revised grid that respects the number of predictors
+feat.count <- c(num_predictors, num_predictors/2, sqrt(num_predictors))
+grid.rf <- expand.grid(mtry = feat.count,
+                       splitrule = c("gini", "extratrees"),
+                       min.node.size = c(1, 5, 10))
+
+# Print the tuning grid to confirm the values
+print(grid.rf)
+
+# Adjust the number of trees to something manageable initially
+tree.num <- seq(100, 300, by=100)  # adjust based on computational feasibility
+
+# Loop through number of trees to optimize model
+results.trees <- list()
+for (ntree in tree.num) {
+  set.seed(123)
+  rf.train <- train(formula,
+                    data=hospital_df,
+                    method="ranger",
+                    trControl = train_control,
+                    tuneGrid = grid.rf,
+                    importance = 'impurity',
+                    num.trees = ntree)  # specify number of trees directly in the train function
+  index <- as.character(ntree)
+  results.trees[[index]] <- rf.train
+}
+
+# Combine results and extract the best model parameters
+output.trees <- do.call(rbind, lapply(results.trees, function(x) x$results))
+best.tune <- output.trees[which.max(output.trees$Accuracy),]
+
+
+# Fitting the final model with optimal parameters using ranger directly
+set.seed(123)
+ps.model.rf <- ranger(formula,
+                      data=hospital_df,
+                      mtry=best.tune$mtry,
+                      splitrule=best.tune$splitrule,
+                      min.node.size=best.tune$min.node.size,
+                      num.trees=best.tune$ntrees,
+                      importance = 'impurity',
+                      probability = TRUE)  # to get predicted probabilities
+
+# Append predicted probabilities onto the original dataset
+# Assuming binary classification or adjust accordingly for multinomial outcomes
+hospital_df$PS.RF <- predict(ps.model.rf, data = hospital_df, type="response")$predictions[,2]
+
+```
