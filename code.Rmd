@@ -36,7 +36,7 @@ After considering the nature of my research question, I considered the following
 *Primary Variables:*
 * Length of Stay (length_of_stay): The primary outcome variable.
 * Patient Disposition (patient_disposition): The secondary outcome variable indicating what happens to patients after surgery (e.g., discharged to home, transferred to another facility).
-* Type of Insurance Coverage (payment_typology_1, payment_typology_2, payment_typology_3): The primary explanatory variables. These indicate the insurance coverage types of the patients.
+* Type of Insurance Coverage (payment_typology_1, payment_typology_2, payment_typology_3): The primary explanatory variable. This indicates the insurance coverage types of the patients.
 
 *Control Variables:*
 * Age Group (age_group): Older patients might stay longer in hospitals due to complications.
@@ -48,18 +48,13 @@ After considering the nature of my research question, I considered the following
 
 ### Loading and pre-cleaning data
 
-I noticed the secondary and tertiary insurance types were missing for alot of patients, likely indicating that there is no additional coverage for these patients. They were classified into a no additional coverage category below. I also converted the relevant variables into factors and ordered them, if applicable.
+I converted the relevant variables into factors and ordered them, if applicable.
 ```{r data_prep}
-hospital_df = read_csv("./data/sparcs_hospital.csv") %>% janitor::clean_names()
+hospital_df = read_csv("./data/sparcs_hospital.csv") %>% janitor::clean_names() %>%  select("payment_typology_1", "age_group", "apr_severity_of_illness_description", "apr_risk_of_mortality", "type_of_admission", "apr_medical_surgical_description", "patient_disposition", "length_of_stay")
 
-# For payment_typology_2 and payment_typology_3
-hospital_df$payment_typology_2[is.na(hospital_df$payment_typology_2)] <- "No Additional Coverage"
-hospital_df$payment_typology_3[is.na(hospital_df$payment_typology_3)] <- "No Additional Coverage"
 
 # Coding as factors
 hospital_df$payment_typology_1 <- as.factor(hospital_df$payment_typology_1)
-hospital_df$payment_typology_2 <- as.factor(hospital_df$payment_typology_2)
-hospital_df$payment_typology_3 <- as.factor(hospital_df$payment_typology_3)
 hospital_df$type_of_admission <- as.factor(hospital_df$type_of_admission)
 hospital_df$apr_medical_surgical_description <- as.factor(hospital_df$apr_medical_surgical_description)
 
@@ -80,8 +75,7 @@ hospital_df$age_group <- factor(hospital_df$age_group,
 My next step was to check for missingness in the variables of interest. Since the missing values were <0.005% of the dataset, the missing values were imputed via the mode.
 ```{r imputation}
 # Specify variables to count missing values for
-imp_vars <- c("length_of_stay", "patient_disposition", 
-                   "payment_typology_1", "payment_typology_2", "payment_typology_3",
+imp_vars <- c("length_of_stay", "patient_disposition",
                    "age_group", "apr_severity_of_illness_description",
                    "apr_risk_of_mortality", "type_of_admission", 
                    "apr_medical_surgical_description")
@@ -94,13 +88,7 @@ missing_counts <- hospital_df %>%
 # Print the counts of missing values
 print(missing_counts)
 
-# Calculate the mode for each variable
-mode_severity <- names(which.max(table(hospital_df$apr_severity_of_illness_description)))
-mode_mortality <- names(which.max(table(hospital_df$apr_risk_of_mortality)))
-
-# Replace missing values with the mode
-hospital_df$apr_severity_of_illness_description[is.na(hospital_df$apr_severity_of_illness_description)] <- mode_severity
-hospital_df$apr_risk_of_mortality[is.na(hospital_df$apr_risk_of_mortality)] <- mode_mortality
+hospital_df<-na.omit(hospital_df)   
 
 ```
 
@@ -111,9 +99,7 @@ hospital_df$apr_risk_of_mortality[is.na(hospital_df$apr_risk_of_mortality)] <- m
 multinom_model <- multinom(payment_typology_1 ~ age_group + apr_severity_of_illness_description + 
                            apr_risk_of_mortality + type_of_admission + apr_medical_surgical_description, 
                            data = hospital_df)
-prop.score <- predict(multinom_model, type = "probs")
-
-hospital_df$ps.logit <- prop.score # the logistic regression estimated PS
+prop_score_multinom <- predict(multinom_model, type = "probs")
 
 ```
 
@@ -122,29 +108,34 @@ hospital_df$ps.logit <- prop.score # the logistic regression estimated PS
 ```{r randomforest}
 set.seed(123)
 
-formula <- payment_typology_1 ~ age_group + apr_severity_of_illness_description + 
+# Define the trainControl
+train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = TRUE
+)
+
+formula_rf <- payment_typology_1 ~ age_group + apr_severity_of_illness_description + 
            apr_risk_of_mortality + type_of_admission + apr_medical_surgical_description
 
 # Calculate the number of predictor variables
-num_predictors <- length(setdiff(names(hospital_df), "payment_typology_1"))
+num_predictors <- 5
 
 # Create a revised grid that respects the number of predictors
 feat.count <- c(num_predictors, num_predictors/2, sqrt(num_predictors))
-grid.rf <- expand.grid(mtry = feat.count,
-                       splitrule = c("gini", "extratrees"),
-                       min.node.size = c(1, 5, 10))
+grid.rf <- expand.grid(mtry=feat.count)
 
 # Print the tuning grid to confirm the values
 print(grid.rf)
 
 # Adjust the number of trees to something manageable initially
-tree.num <- seq(100, 300, by=100)  # adjust based on computational feasibility
+tree.num <- seq(100, 300, by=100)  
 
 # Loop through number of trees to optimize model
 results.trees <- list()
 for (ntree in tree.num) {
   set.seed(123)
-  rf.train <- train(formula,
+  rf.train <- train(formula_rf,
                     data=hospital_df,
                     method="ranger",
                     trControl = train_control,
@@ -162,7 +153,7 @@ best.tune <- output.trees[which.max(output.trees$Accuracy),]
 
 # Fitting the final model with optimal parameters using ranger directly
 set.seed(123)
-ps.model.rf <- ranger(formula,
+ps.model.rf <- ranger(formula_rf,
                       data=hospital_df,
                       mtry=best.tune$mtry,
                       splitrule=best.tune$splitrule,
@@ -174,5 +165,13 @@ ps.model.rf <- ranger(formula,
 # Append predicted probabilities onto the original dataset
 # Assuming binary classification or adjust accordingly for multinomial outcomes
 hospital_df$PS.RF <- predict(ps.model.rf, data = hospital_df, type="response")$predictions[,2]
+
+# Combine propensity scores with the original data
+hospital_df$propensity_score_multinom <- prop_score_multinom[, "Insurance ype"]
+
+# Fit multivariate regression model
+fit <- svyglm(cbind(length_of_stay, patient_disposition) ~ payment_typology_1 + payment_typology_2 + payment_typology_3 + age_group + apr_severity_of_illness_description + apr_risk_of_mortality + type_of_admission + apr_medical_surgical_description + propensity_score_multinom + ps_rf, design = svydesign(ids = ~1, data = hospital_df))
+summary(fit)
+
 
 ```
