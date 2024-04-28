@@ -26,16 +26,14 @@ library(progress)
 
 ## Option 2: Explore a provided dataset for pre-specified research goals
 
-I decided to go with *option c*, which involves constructing a propensity score to aid in an epidemiologic analysis of an etiologic question and then
-performing an analysis using the propensity score to address that etiologic question.
+I decided to go with *Option C*, which involves constructing a propensity score to aid in an epidemiologic analysis of an etiologic question and then performing an analysis using the propensity score to address that etiologic question.
 
-My research question is as follows: How does length of hospital stay and subsequent patient disposition vary by type of insurance coverage in surgical patients?
+My research question is as follows: How does length of hospital stay vary by type of insurance coverage in surgical patients?
 
 After considering the nature of my research question, I considered the following variables to be key to answering my research question,
 
 *Primary Variables:*
 * Length of Stay (length_of_stay): The primary outcome variable.
-* Patient Disposition (patient_disposition): The secondary outcome variable indicating what happens to patients after surgery (e.g., discharged to home, transferred to another facility).
 * Type of Insurance Coverage (payment_typology_1, payment_typology_2, payment_typology_3): The primary explanatory variable. This indicates the insurance coverage types of the patients.
 
 *Control Variables:*
@@ -111,8 +109,10 @@ set.seed(123)
 # Define the trainControl
 train_control <- trainControl(
   method = "cv",
-  number = 5,
-  verboseIter = TRUE
+  number = 3,  # Reduced number of folds from 5 to 3
+  verboseIter = TRUE,
+  savePredictions = "final",  # Store predictions for the final model only to save memory
+  allowParallel = TRUE  # Enable parallel processing if supported
 )
 
 formula_rf <- payment_typology_1 ~ age_group + apr_severity_of_illness_description + 
@@ -123,7 +123,11 @@ num_predictors <- 5
 
 # Create a revised grid that respects the number of predictors
 feat.count <- c(num_predictors, num_predictors/2, sqrt(num_predictors))
-grid.rf <- expand.grid(mtry=feat.count)
+grid.rf <- expand.grid(
+  mtry = c(sqrt(num_predictors), num_predictors/2),  # Example: smallest and middle value
+  splitrule = c("gini"),  # Using just one rule to minimize combinations
+  min.node.size = c(1)  # Using the default smallest node size
+)
 
 # Print the tuning grid to confirm the values
 print(grid.rf)
@@ -158,7 +162,7 @@ ps.model.rf <- ranger(formula_rf,
                       mtry=best.tune$mtry,
                       splitrule=best.tune$splitrule,
                       min.node.size=best.tune$min.node.size,
-                      num.trees=best.tune$ntrees,
+                      num.trees=500,
                       importance = 'impurity',
                       probability = TRUE)  # to get predicted probabilities
 
@@ -167,7 +171,7 @@ ps.model.rf <- ranger(formula_rf,
 hospital_df$PS.RF <- predict(ps.model.rf, data = hospital_df, type="response")$predictions[,2]
 
 # Combine propensity scores with the original data
-hospital_df$propensity_score_multinom <- prop_score_multinom[, "Insurance ype"]
+hospital_df$propensity_score_multinom <- prop_score_multinom[, "Insurance type"]
 
 # Fit multivariate regression model
 fit <- svyglm(cbind(length_of_stay, patient_disposition) ~ payment_typology_1 + payment_typology_2 + payment_typology_3 + age_group + apr_severity_of_illness_description + apr_risk_of_mortality + type_of_admission + apr_medical_surgical_description + propensity_score_multinom + ps_rf, design = svydesign(ids = ~1, data = hospital_df))
