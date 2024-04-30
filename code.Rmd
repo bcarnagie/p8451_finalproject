@@ -20,7 +20,7 @@ library(dplyr)
 library(nnet)
 library(ranger)
 library(progress)
-
+library(glmnet) 
 ```
 
 
@@ -48,8 +48,7 @@ After considering the nature of my research question, I considered the following
 
 I converted the relevant variables into factors and ordered them, if applicable.
 ```{r data_prep}
-hospital_df = read_csv("./data/sparcs_hospital.csv") %>% janitor::clean_names() %>%  select("payment_typology_1", "age_group", "apr_severity_of_illness_description", "apr_risk_of_mortality", "type_of_admission", "apr_medical_surgical_description", "patient_disposition", "length_of_stay")
-
+hospital_df = read_csv("/Users/briannacarnagie/Downloads/Hospital_Inpatient_Discharges__SPARCS_De-Identified___2015.csv") %>% janitor::clean_names() %>%  -select("payment_typology_1", "age_group", "apr_severity_of_illness_description", "apr_risk_of_mortality", "type_of_admission", "apr_medical_surgical_description", "patient_disposition", "length_of_stay")
 
 # Coding as factors
 hospital_df$payment_typology_1 <- as.factor(hospital_df$payment_typology_1)
