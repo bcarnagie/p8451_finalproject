@@ -41,6 +41,9 @@ library(nnet)
 library(ranger)
 library(progress)
 library(glmnet)
+library(pROC)
+library(glmnet)
+library(ggplot2)
 ```
 
 # Step 2: Loading and cleaning the dataset
@@ -48,6 +51,8 @@ library(glmnet)
 In my assignment prep, I loaded and refined the SPARCS dataset. Using read_csv, I imported the data and standardized column names with clean_names. I isolated surgical discharges via filter and grepl, removing irrelevant columns and rows with missing values. This streamlined dataset is now ready for detailed analysis, providing valuable insights into hospital discharge patterns.
 ```{r}
 hospital_df = read_csv("/Users/briannacarnagie/Downloads/Hospital_Inpatient_Discharges__SPARCS_De-Identified___2015.csv") %>% janitor::clean_names() |>  filter(type_of_admission == "Urgent" & grepl("surgical", apr_medical_surgical_description, ignore.case = TRUE))
+
+hospital_df$payment_typology_1 <- factor(hospital_df$payment_typology_1)
 
 
 # Columns to delete
@@ -70,7 +75,7 @@ hospital_df<-na.omit(hospital_df)
 In defining my propensity score estimation model, I specified predictors such as age group, gender, race, ethnicity, type of admission, CCS diagnosis description, APR severity of illness description, and APR risk of mortality. The target variable for propensity score estimation was set as "payment_typology_1". Using these predictors and the target variable, I created a formula for the Random Forest model. To optimize the model, I defined a grid of hyperparameters including the number of variables to consider at each split (mtry), the splitting rule (splitrule), and the minimum number of observations in each terminal node (min.node.size). Employing k-fold cross-validation with 3 folds, I tuned the hyperparameters for the Random Forest model. Subsequently, I trained the Random Forest model with the best hyperparameters obtained from the tuning process. Finally, I extracted propensity scores from the trained model, enabling further analysis of treatment effects in the hospital discharge dataset.
 ```{r}
 # Define predictors (covariates) for propensity score estimation
-predictors <- c("age_group", "gender", "race", "ethnicity", "ccs_diagnosis_description", "apr_severity_of_illness_description", "apr_risk_of_mortality")
+predictors <- c("age_group", "gender", "race", "ethnicity", "apr_severity_of_illness_description", "apr_risk_of_mortality")
 
 # Define the target variable (treatment) for propensity score estimation
 treatment <- "payment_typology_1"
@@ -99,30 +104,68 @@ rf_model <- ranger(formula, data = hospital_df, mtry = best_mtry, splitrule = be
 propensity_scores <- predict(rf_model, data = hospital_df, type = "response")
 ```
 
-# Step 4: Using Propensity Score Matching 
+
+# Step 3: Propensity Score Estimation via Multinomial Logistic Regression
+
+Due to the high dimensionality of the model, regularization was used to reduce the model complexity by penalizing the size of the coefficients.
+
+```{r}
+
+# Fit the multinomial logistic regression model
+multinom_model <- multinom(payment_typology_1 ~ age_group + gender + race + ethnicity + apr_severity_of_illness_description + apr_risk_of_mortality, data = hospital_df)
+
+# Summary of the model
+summary(multinom_model)
+
+# Predict the probabilities (propensity scores)
+propensity_scores <- predict(multinom_model, type = "probs")
+
+# Attach the propensity scores back to the dataframe
+for (i in 1:ncol(propensity_scores)) {
+  hospital_df[paste("PS_", colnames(propensity_scores)[i], sep = "")] <- propensity_scores[, i]
+}
+
+
+```
+
+# Step 4: Model Comparison
+
+
+```{r}
+
+```
+
+
+
+
+
+# Step 4: Using Propensity Score Weighting
 
 In analyzing the length of hospital stay by insurance coverage, I first combined the propensity scores obtained earlier with the original dataset, creating a new dataset named data_with_propensity. I then utilized the propensity scores for balancing treatment groups, employing propensity score matching. By matching treatment groups based on propensity scores, I generated a subset of the dataset called matched_data. Subsequently, I proceeded to analyze the relationship between insurance coverage and length of hospital stay. I employed both linear regression, incorporating propensity scores as covariates. Finally, I assessed the results obtained from the model summary to evaluate the impact of insurance coverage on the length of hospital stay.
 ```{r}
-# Assuming you've obtained the propensity scores in 'propensity_scores' variable
-# Also assuming 'length_of_stay' is the outcome variable of interest
+# Define insurance types
+insurance_types <- c("Medicaid", "Medicare", "Self-Pay", "Blue Cross/Blue Shield", "Private Health Insurance", "Federal/State/Local/VA", "Department of Corrections", "Miscellaneous/Other", "Managed Care, Unspecified", "Unknown")
 
-# Combine propensity scores and treatment variable (insurance coverage) with original data
-data_with_propensity <- cbind(data, propensity_scores)
+# Initialize a list to store weighted datasets for each insurance type
+weighted_datasets <- list()
 
-# Optionally, use propensity scores for matching or weighting to balance treatment groups
-# For example, propensity score matching:
-matched_data <- Match(Tr = data$insurance_coverage, X = propensity_scores, M = 1)
-
-# Extract matched data
-matched_indices <- matched_data$index
-matched_data <- data_with_propensity[matched_indices, ]
-
-# Analyze the length of hospital stay by insurance coverage
-# For example, using linear regression with propensity scores as a covariate
-lm_model <- lm(length_of_stay ~ insurance_coverage + propensity_scores, data = matched_data)
-
-# Check the results and assess the impact of insurance coverage on length of hospital stay
-summary(lm_model)
+# Loop through each insurance type
+for (insurance_type in insurance_types) {
+  # Create treatment indicator based on current insurance type
+  treatment_indicator <- ifelse(hospital_df$payment_typology_1 == insurance_type, 1, 0)
+  
+  # Extract propensity scores for the current insurance type
+  propensity_scores_insurance <- propensity_scores[[insurance_type]]
+  
+  # Calculate weights based on propensity scores for current insurance type
+  weights <- ifelse(treatment_indicator == 1, 1 / propensity_scores_insurance, 1 / (1 - propensity_scores_insurance))
+  
+  # Assign weights to dataset
+  weighted_df <- cbind(hospital_df, weights)
+  
+  # Store weighted dataset in the list
+  weighted_datasets[[insurance_type]] <- weighted_df
+}
 ```
 
 Step 5: Propensity Score Estimation via Logistic Regression
