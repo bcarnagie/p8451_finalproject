@@ -1,0 +1,57 @@
+
+
+
+# Convert the entire column to numeric
+hospital_df$length_of_stay <- as.numeric(hospital_df$length_of_stay)
+
+
+
+y <- as.numeric(hospital_df$length_of_stay)  # Convert to numeric if it's not already
+x <- model.matrix(~ . - length_of_stay, data = hospital_df)  # Exclude the response variable
+
+# Fit the Lasso Model
+set.seed(123)
+cv_lasso <- cv.glmnet(x, y, family = "gaussian", alpha = 1, nfolds = 5)
+ # Assuming the response is continuous
+
+# Best lambda
+optimal_lambda <- cv_lasso$lambda.min
+
+
+# Convert columns to factors based on a heuristic (e.g., fewer than 20 unique values)
+hospital_df[] <- lapply(hospital_df, function(x) if(length(unique(x)) < 20) factor(x) else x)
+
+# Replace "120 +" with "120"
+hospital_df$length_of_stay <- as.character(hospital_df$length_of_stay)
+hospital_df$length_of_stay[hospital_df$length_of_stay == "120 +"] <- 120
+
+# Fit final model with optimal lambda
+final_lasso_model <- glmnet(x, y, family = "gaussian", alpha = 1, lambda = optimal_lambda)
+
+# Extracting coefficients
+coef_lasso <- coef(final_lasso_model, s = "lambda.min")
+important_predictors <- coef_lasso[coef_lasso != 0]
+print(important_predictors)
+
+
+
+
+# Set threshold for identifying important predictors
+threshold <- 2.0  # Adjust this threshold as needed
+
+coeffs <- coef(lasso_model)[-1] 
+
+# Extract important predictors based on threshold
+important_coeffs <- coeffs[abs(coeffs) > threshold]
+
+# Extract corresponding variable names
+important_vars <- names(important_coeffs)
+
+# Plot coefficients
+barplot(important_coeffs, names.arg = important_vars, horiz = TRUE,
+        main = "LASSO Coefficients (Threshold = 0.5)", xlab = "Coefficient Value")
+```
+
+```{r}
+
+```

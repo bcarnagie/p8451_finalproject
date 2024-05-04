@@ -1,0 +1,143 @@
+---
+title: "lasso and rf"
+author: "Brianna Carnagie"
+date: "2024-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Option 2: Explore a provided dataset for pre-specified research goals
+
+I decided to go with *Option C*, which involves constructing a propensity score to aid in an epidemiologic analysis of an etiologic question and then performing an analysis using the propensity score to address that etiologic question.
+
+My research question is as follows: How does length of hospital stay vary by type of insurance coverage in urgent, surgical patients?
+
+After considering the nature of my research question, I considered the following variables to be key to answering my research question,
+
+*Primary Variables:*
+* Length of Stay (length_of_stay): The primary outcome variable.
+* Type of Insurance Coverage (payment_typology_1): The primary explanatory variable. This indicates the insurance coverage types of the patients.
+
+*Control Variables:*
+* Age Group (age_group): Older patients might stay longer in hospitals due to complications.
+* APR Severity of Illness (apr_severity_of_illness_description): This might influence both the length of stay.
+* APR Risk of Mortality (apr_risk_of_mortality): This is crucial as it likely correlates with both the severity of the illness.
+
+# Step 1: Loading libraries
+
+Self-explanatory, but my first step included loading the libraries I will be using for this project.
+```{r, message=FALSE}
+library(tidyverse)
+library(MatchIt)
+library(randomForest)
+library(caret)
+library(tidyverse)
+library(VIM)
+library(dplyr)
+library(nnet)
+library(ranger)
+library(progress)
+library(glmnet)
+```
+
+# Step 2: Loading and cleaning the dataset
+
+In my assignment prep, I loaded and refined the SPARCS dataset. Using read_csv, I imported the data and standardized column names with clean_names. I isolated surgical discharges via filter and grepl, removing irrelevant columns and rows with missing values. This streamlined dataset is now ready for detailed analysis, providing valuable insights into hospital discharge patterns.
+```{r}
+hospital_df = read_csv("/Users/briannacarnagie/Downloads/Hospital_Inpatient_Discharges__SPARCS_De-Identified___2015.csv") %>% janitor::clean_names() |>  filter(type_of_admission == "Urgent" & grepl("surgical", apr_medical_surgical_description, ignore.case = TRUE))
+
+
+# Columns to delete
+columns_to_delete <- c("health_service_area", "hospital_county", "operating_certificate_number", "facility_id", 
+                       "facility_name", "zip_code_3_digits", "discharge_year", "ccs_diagnosis_code", 
+                       "ccs_procedure_code", "ccs_procedure_description", 
+                       "apr_drg_description", "apr_drg_code", "apr_severity_of_illness_code", "apr_mdc_code", "apr_mdc_description",   
+                       "payment_typology_2", "payment_typology_3", "birth_weight", "abortion_edit_indicator", 
+                       "emergency_department_indicator", "total_charges", "total_costs", "apr_medical_surgical_description", "type_of_admission")
+
+# Delete columns
+hospital_df <- hospital_df[, !(names(hospital_df) %in% columns_to_delete)]
+
+# Deleting NA values
+hospital_df<-na.omit(hospital_df)   
+```
+
+# Step 3: Propensity Score Estimation via Random Forest 
+
+In defining my propensity score estimation model, I specified predictors such as age group, gender, race, ethnicity, type of admission, CCS diagnosis description, APR severity of illness description, and APR risk of mortality. The target variable for propensity score estimation was set as "payment_typology_1". Using these predictors and the target variable, I created a formula for the Random Forest model. To optimize the model, I defined a grid of hyperparameters including the number of variables to consider at each split (mtry), the splitting rule (splitrule), and the minimum number of observations in each terminal node (min.node.size). Employing k-fold cross-validation with 3 folds, I tuned the hyperparameters for the Random Forest model. Subsequently, I trained the Random Forest model with the best hyperparameters obtained from the tuning process. Finally, I extracted propensity scores from the trained model, enabling further analysis of treatment effects in the hospital discharge dataset.
+```{r}
+# Define predictors (covariates) for propensity score estimation
+predictors <- c("age_group", "gender", "race", "ethnicity", "ccs_diagnosis_description", "apr_severity_of_illness_description", "apr_risk_of_mortality")
+
+# Define the target variable (treatment) for propensity score estimation
+treatment <- "payment_typology_1"
+
+# Create formula for Random Forest model
+formula <- as.formula(paste(treatment, "~", paste(predictors, collapse = "+")))
+
+# Define grid of hyperparameters for tuning
+hyperparameters <- expand.grid(mtry = seq(2, length(predictors), by = 1), 
+                               splitrule = c("gini"),
+                               min.node.size = c(1, 5, 10))
+
+# Perform k-fold cross-validation for hyperparameter tuning
+ctrl <- trainControl(method = "cv", number = 3)
+rf_tune <- train(formula, data = hospital_df, method = "ranger", trControl = ctrl, tuneGrid = hyperparameters)
+
+# Get the best hyperparameters
+best_mtry <- rf_tune$bestTune$mtry
+best_splitrule <- rf_tune$bestTune$splitrule
+best_min_node_size <- rf_tune$bestTune$min.node.size
+
+# Train Random Forest model with the best hyperparameters
+rf_model <- ranger(formula, data = hospital_df, mtry = best_mtry, splitrule = best_splitrule, min.node.size = best_min_node_size)
+
+# Extract propensity scores
+propensity_scores <- predict(rf_model, data = hospital_df, type = "response")
+```
+
+# Step 4: Using Propensity Score Matching 
+
+In analyzing the length of hospital stay by insurance coverage, I first combined the propensity scores obtained earlier with the original dataset, creating a new dataset named data_with_propensity. I then utilized the propensity scores for balancing treatment groups, employing propensity score matching. By matching treatment groups based on propensity scores, I generated a subset of the dataset called matched_data. Subsequently, I proceeded to analyze the relationship between insurance coverage and length of hospital stay. I employed both linear regression, incorporating propensity scores as covariates. Finally, I assessed the results obtained from the model summary to evaluate the impact of insurance coverage on the length of hospital stay.
+```{r}
+# Assuming you've obtained the propensity scores in 'propensity_scores' variable
+# Also assuming 'length_of_stay' is the outcome variable of interest
+
+# Combine propensity scores and treatment variable (insurance coverage) with original data
+data_with_propensity <- cbind(data, propensity_scores)
+
+# Optionally, use propensity scores for matching or weighting to balance treatment groups
+# For example, propensity score matching:
+matched_data <- Match(Tr = data$insurance_coverage, X = propensity_scores, M = 1)
+
+# Extract matched data
+matched_indices <- matched_data$index
+matched_data <- data_with_propensity[matched_indices, ]
+
+# Analyze the length of hospital stay by insurance coverage
+# For example, using linear regression with propensity scores as a covariate
+lm_model <- lm(length_of_stay ~ insurance_coverage + propensity_scores, data = matched_data)
+
+# Check the results and assess the impact of insurance coverage on length of hospital stay
+summary(lm_model)
+```
+
+Step 5: Propensity Score Estimation via Logistic Regression
+
+```{r}
+# Logistic Regression for Propensity Score Estimation
+logit_model <- glm(treatment ~ predictors, data = hospital_df, family = "binomial")
+
+# Extract propensity scores from logistic regression model
+logit_propensity_scores <- predict(logit_model, type = "response")
+
+# Optionally, you can standardize the propensity scores for comparison
+logit_propensity_scores <- logit_propensity_scores / mean(logit_propensity_scores)
+
+# Now, you can compare the propensity scores obtained from Random Forest and logistic regression
+
+```
+
