@@ -46,7 +46,6 @@ library(pROC)
 library(glmnet)
 library(ggplot2)
 library(cobalt)
-library(survey)
 ```
 
 # Step 2: Loading and cleaning the dataset
@@ -71,9 +70,6 @@ hospital_df <- hospital_df[, !(names(hospital_df) %in% columns_to_delete)]
 
 # Deleting NA values
 hospital_df<-na.omit(hospital_df)   
-
-hospital_df$length_of_stay <- gsub("120 \\+", "120", hospital_df$length_of_stay)
-hospital_df$length_of_stay <- as.numeric(as.character(hospital_df$length_of_stay))
 ```
 
 # Step 3: Propensity Score Estimation via Random Forest 
@@ -137,10 +133,10 @@ for (i in 1:ncol(propensity_scores)) {
 
 # Step 4:  Examine region of common support
 
-This is common for propensity score analyses, to ensure that there is overlap in propensities among those who are in each insurance type group. For my RF plot, I first had to transform the matrix into a long format dataframe where each row corresponds to an observation and includes the insurance type and the associated propensity score (turn it into long format). This was done for the random forest and logistic regression plot.
+This is common for propensity score analyses, to ensure that there is overlap in propensities among those who are in each insurance type group. For my RF plt, I first had to transform the matrix into a long format dataframe where each row corresponds to an observation and includes the insurance type and the associated propensity score (turn it into long format). This was done for the random forest and logistic regression plot.
 ```{r overlap}
 
-# Adding a unique identifier to the dataframe before reshaping 
+# Adding a unique identifier to the dataframe before reshaping (if not already present)
 hospital_df$ID <- seq_len(nrow(hospital_df))
 
 # Convert the matrix of propensity scores to a dataframe and gather it to long format
@@ -160,6 +156,7 @@ ggplot(long_propensity_scores, aes(x = Propensity_Score)) +
 
 propensity_scores_long <- reshape2::melt(hospital_df, id.vars = "payment_typology_1", measure.vars = paste("PS_", colnames(propensity_scores), sep = ""))
 
+
 ggplot(propensity_scores_long, aes(x = value)) +
   geom_histogram(bins = 30, fill = "pink3", color = "black", alpha = 0.7) +
   facet_wrap(~variable, scales = "free") +
@@ -169,60 +166,60 @@ ggplot(propensity_scores_long, aes(x = value)) +
 ```
 
 
-# Step 4: Apply Propensity Score Weighting
+# Step 4: Model Comparison
 
-In this code chunk, I apply weighting so that I can balance the covariates across different insurance types.
+In this code chunk, I assess covariate balance.
 ```{r}
 
 
-hospital_df$weights_lr <- with(hospital_df, ifelse(payment_typology_1 == "Self-Pay",
-                                                  1 / (1 - propensity_scores),
-                                                  1 / propensity_scores))
+# For Random Forest
+bal.tab(hospital_df$propensity_scores_rf, data = hospital_df, treat = "payment_typology_1", method = "weighting", s.d.denom = "pooled", binary = "std")
 
-hospital_df$weights_rf <- with(hospital_df, ifelse(payment_typology_1 == "Self-Pay",
-                                                   1 / pmax(propensity_scores_rf, 0.01),  # Prevent division by very small numbers
-                                                   1 / pmax(1 - propensity_scores_rf, 0.01)))
+weights <- weightit(treat ~ age_group + gender + race + ethnicity, 
+                    data = hospital_df, 
+                    method = "ps", 
+                    estimand = "ATE", 
+                    link = "logit")  # This is for binary; adjust accordingly for multinomial
 
-cap <- quantile(hospital_df$weights_rf, 0.99, na.rm = TRUE)
-hospital_df$weights_rf <- pmin(hospital_df$weights_rf, cap)
-
-```
-
-# Step 4: Perform Weighted Analysis
-```{r}
-
-weighted_lm_lr <- lm(length_of_stay ~ payment_typology_1, data = hospital_df, weights = weights_lr)
-
-weighted_glm_rf <- glm(length_of_stay ~ payment_typology_1, family = gaussian(link = "identity"), data = hospital_df, weights = weights_rf)
+# Now use these weights in the balance checking
+bal.tab(data = hospital_df, treat = "payment_typology_1", 
+        covs = c("age_group", "gender", "race", "ethnicity"),
+        weights = weights$weights, 
+        method = "weighting", 
+        s.d.denom = "pooled", 
+        binary = "std")
 
 ```
 
 
-# Step 4: Comparison and Evaluation
+
+
+
+# Step 4: Using Propensity Score Weighting
+
+In analyzing the length of hospital stay by insurance coverage, I first combined the propensity scores obtained earlier with the original dataset, creating a new dataset named data_with_propensity. I then utilized the propensity scores for balancing treatment groups, employing propensity score matching. By matching treatment groups based on propensity scores, I generated a subset of the dataset called matched_data. Subsequently, I proceeded to analyze the relationship between insurance coverage and length of hospital stay. I employed both linear regression, incorporating propensity scores as covariates. Finally, I assessed the results obtained from the model summary to evaluate the impact of insurance coverage on the length of hospital stay.
 ```{r}
-summary(weighted_glm_rf)  
+# Define insurance types
+insurance_types <- c("Medicaid", "Medicare", "Self-Pay", "Blue Cross/Blue Shield", "Private Health Insurance", "Federal/State/Local/VA", "Department of Corrections", "Miscellaneous/Other", "Managed Care, Unspecified", "Unknown")
 
-weighted_lm_lr
+# Initialize a list to store weighted datasets for each insurance type
+weighted_datasets <- list()
 
+# Loop through each insurance type
+for (insurance_type in insurance_types) {
+  # Create treatment indicator based on current insurance type
+  treatment_indicator <- ifelse(hospital_df$payment_typology_1 == insurance_type, 1, 0)
+  
+  # Extract propensity scores for the current insurance type
+  propensity_scores_insurance <- propensity_scores[[insurance_type]]
+  
+  # Calculate weights based on propensity scores for current insurance type
+  weights <- ifelse(treatment_indicator == 1, 1 / propensity_scores_insurance, 1 / (1 - propensity_scores_insurance))
+  
+  # Assign weights to dataset
+  weighted_df <- cbind(hospital_df, weights)
+  
+  # Store weighted dataset in the list
+  weighted_datasets[[insurance_type]] <- weighted_df
+}
 ```
-*Random Forest Model (weighted_glm_rf):*
-In the analysis conducted using weights derived from the Random Forest propensity scores, the findings reveal substantial variations in the length of hospital stays across different insurance types when compared to the Self-Pay reference group. Specifically:
-
-* Department of Corrections: Patients with this type of insurance have a significantly longer hospital stay, with an estimated increase of approximately 3.18 days compared to Self-Pay patients.
-* Medicare: Individuals covered by Medicare tend to stay about 3.06 days longer than Self-Pay patients, highlighting potentially greater healthcare needs or more intensive care utilization.
-* Miscellaneous/Other: This category shows an increase of about 2.21 days in the length of stay compared to Self-Pay, suggesting varied but consistently more extensive use of hospital resources.
-* Self-Pay: Serving as the baseline, this group typically represents patients who may have fewer interventions or shorter stays due to out-of-pocket cost considerations.
-
-These results from the Random Forest model suggest that certain types of insurance are associated with longer hospital stays, which could be indicative of more complex health issues or broader access to care for insured patients.
-
-*Logistic Regression (weighted_lm_lr):*
-For the Logistic Regression model, the estimated differences in hospital stay lengths relative to the Self-Pay group are as follows:
-
-* Department of Corrections: The length of stay for these patients is extended by about 1.98 days, indicating a significant difference in hospital use compared to the Self-Pay group.
-* Medicare: Patients with Medicare insurance stay approximately 2.42 days longer than those paying for themselves, potentially reflecting more severe health profiles or better access to necessary care.
-* Miscellaneous/Other: This insurance group is associated with an additional 3.94 days in hospital stay length, suggesting substantial differences in care needs or insurance coverage benefits.
-* Self-Pay: As the reference group, these findings emphasize disparities in the utilization and potentially the quality of care accessible to patients without insurance or those choosing to pay out of pocket.
-
-The Logistic Regression model corroborates the trend observed in the Random Forest analysis, with insured groups generally experiencing longer hospital stays. This could reflect a combination of more comprehensive care facilitated by insurance coverage and possibly more complex medical conditions among insured patients.
-
-Both models consistently demonstrate that insured patients, particularly those covered by Medicare, Department of Corrections, and various other insurance types, tend to have longer hospital stays compared to Self-Pay patients. This analysis not only highlights the impact of insurance on healthcare utilization but also underscores the importance of considering how different insurance types influence patient care strategies and hospital resource management. These insights are crucial for healthcare administrators and policymakers aiming to improve healthcare equity and efficiency.
